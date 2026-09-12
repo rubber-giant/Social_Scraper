@@ -1,0 +1,23 @@
+# Secrets — NEVER commit or share these (see README "Sharing safely")
+.env
+.env.local
+session.json
+
+# Your personal config (start from config.example.yaml)
+config.yaml
+
+# Generated output (contains contact/PII)
+output/
+*.xlsx
+
+# Logs
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Keep the example files shareable (they contain placeholders only)
+!.env.example
+!config.example.yaml

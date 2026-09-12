@@ -1,0 +1,66 @@
+# ---- Social Scraper configuration ----
+# Copy to config.yaml and edit. Every key is optional (defaults shown).
+#
+# TIME & LEADS (rules of thumb): time ~= candidates x ~1 min; leads ~= 15-20%
+# of candidates. See the README "Tuning runtime & lead volume" section for
+# presets (quick test / balanced / big run) and worked examples.
+
+settings:
+  # Base delay between Instagram requests, plus a random extra of jitter seconds.
+  # Lower = faster but more likely to be throttled/flagged. Keep >= 2-3s.
+  per_request_delay_sec: 3.0
+  request_delay_jitter: 2.0
+  # Which hashtag feed to scan: top (fewer, popular) | recent | both (~2x work).
+  hashtag_mode: recent
+  # Number of posts to scan per hashtag (more posts -> more candidates -> slower).
+  hashtag_medias_per_tag: 30
+  # HARD CAP on how many candidate profiles get enriched per run (0 = no cap).
+  # Keep the sum of niches[].max_authors <= this, or the cap truncates the
+  # niches listed last.
+  max_candidates: 400
+
+scoring:
+  # Ignore accounts outside this follower range.
+  min_followers: 1000
+  max_followers: 500000
+  # Account must have posted within this many days to count as active.
+  max_days_since_last_post: 30
+  # Optional extra gate: minimum avg engagement % (avg likes+comments/followers).
+  # 0 disables it. Needs engagement_sample_posts > 0.
+  min_engagement_pct: 0.0
+  # Recent posts to sample for engagement metrics. 0 = off (fewer API calls).
+  engagement_sample_posts: 0
+
+# Substrings that suggest an account sells something (matched against name + bio).
+commerce_keywords: [shop, store, free shipping, etsy, boutique, order, buy]
+
+# ---------------------------------------------------------------------------
+# NICHES
+# Tips:
+#   * name is auto-slugged into a hashtag: "home decor" -> #homedecor
+#     (always scanned). Put EXTRA tags in hashtags[].
+#   * Prefer SPECIFIC, product-intent tags (#candlebrand, #smallbizcandles) over
+#     vague mega-tags (#gifts, #fyp, #viral) which sweep in random accounts.
+#   * Keep 2-4 tags per niche; more tags = linearly more discovery time.
+#   * Order matters: put your best niches FIRST (the global cap truncates last).
+#   * max_authors caps how many candidates this niche contributes (cost control).
+# ---------------------------------------------------------------------------
+niches:
+  - name: jwellery
+    # NOTE: the correct spelling is usually "jewellery"/"jewelry" — those tags
+    # are far bigger. "jwellery" is a common misspelling but much smaller.
+    # Prefer specific, product-intent tags over broad ones like #gifts.
+    hashtags: [jewellerybrand, handmadejewellery, customizedjewellery]
+    max_authors: 200
+
+  - name: home decor
+    # No extra tags needed — #homedecor is scanned automatically from the name.
+    # Add product-intent tags here if you want more:
+    # hashtags: [homedecorstore, smallbizhomedecor]
+    hashtags: []
+    max_authors: 150
+
+# --- Example: adding a third niche (just append to the list) ----------------
+#  - name: activewear
+#    hashtags: [activewearbrand, smallbizactivewear]
+#    max_authors: 50
