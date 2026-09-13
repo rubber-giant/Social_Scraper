@@ -43,6 +43,8 @@ COLUMNS: Sequence[tuple] = [
     ("Product signals", "product_detail", "text"),
     ("Matched niche", "niche_label", "text"),
     ("Found via", "found_via_label", "text"),
+    ("Discovery sources", "discovery_sources_label", "text"),
+    ("Relevance", "relevance_matched", "text"),
     ("Why excluded", "flags", "text"),
 ]
 
@@ -53,6 +55,7 @@ WIDTHS = {
     "Days inactive": 12, "Active?": 8, "Business?": 10, "Verified?": 10,
     "Website": 32, "Email": 28, "Other emails": 28, "Phone": 15,
     "Product signals": 30, "Matched niche": 18, "Found via": 18,
+    "Discovery sources": 40, "Relevance": 26,
     "Why excluded": 26,
 }
 
@@ -65,7 +68,8 @@ def _finalize_row(row: Dict) -> Dict:
     latest = row.get("latest_post")
     row["latest_date"] = latest.strftime("%Y-%m-%d") if latest else ""
     row["niche_label"] = ", ".join(row.get("niches") or [])
-    row["found_via_label"] = "#" + row["found_via"] if row.get("found_via") else ""
+    if not row.get("found_via_label"):
+        row["found_via_label"] = "#" + row["found_via"] if row.get("found_via") else ""
     return row
 
 
@@ -158,6 +162,13 @@ def export_workbook(rows: List[Dict], out_path: str | Path) -> Path:
         ("Score (0-100) ranks: size fit + post recency + product signals + contact quality.", ""),
         ("Product signals", "link-in-bio / commerce keyword in bio/name / business category."),
         ("Contact", "email in bio or public business email > phone > website (reach via site)."),
+        ("", ""),
+        ("How accounts were discovered", ""),
+        ("'Discovery sources' lists every surface that found the account.", ""),
+        ("hashtag = author of a post under a niche tag; keyword = account search;", ""),
+        ("chaining = Instagram's 'similar accounts' expanded from seed brands.", ""),
+        ("Higher-provenance sources (chaining > keyword > hashtag) rank first in each niche.", ""),
+        ("'Relevance' shows the niche keywords actually matched in the account's own posts.", ""),
         ("", ""),
         ("Caveats", ""),
         ("- Data comes from Instagram's private API via instagrapi; use a throwaway account.", ""),

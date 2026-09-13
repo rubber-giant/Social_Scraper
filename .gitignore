@@ -10,6 +10,10 @@ config.yaml
 output/
 *.xlsx
 
+# Internal planning / business docs (never share)
+PRODUCT_ROADMAP.md
+notes/
+
 # Logs
 *.log
 

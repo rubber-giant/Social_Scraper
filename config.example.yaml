@@ -10,6 +10,12 @@ settings:
   # Lower = faster but more likely to be throttled/flagged. Keep >= 2-3s.
   per_request_delay_sec: 3.0
   request_delay_jitter: 2.0
+  # THE dominant speed knob. instagrapi sleeps this long before every request
+  # (anti-ban pacing), then adds the delay above — so real cadence is
+  # request_timeout + delay_range (~34s at the default 30). It is also the
+  # socket timeout: too low and slow replies raise ClientRequestTimeout, which
+  # retries after a 60s sleep. 10-15 is a reasonable faster setting.
+  request_timeout: 30
   # Which hashtag feed to scan: top (fewer, popular) | recent | both (~2x work).
   hashtag_mode: recent
   # Number of posts to scan per hashtag (more posts -> more candidates -> slower).
@@ -30,6 +36,56 @@ scoring:
   min_engagement_pct: 0.0
   # Recent posts to sample for engagement metrics. 0 = off (fewer API calls).
   engagement_sample_posts: 0
+
+# ---------------------------------------------------------------------------
+# DISCOVERY (how candidate accounts are found)
+# Three strategies run, merged and de-duplicated, then capped per niche by
+# provenance priority (chaining > keyword > hashtag):
+#   hashtag  - authors of posts under the niche's tags (the original method)
+#   keyword  - account search on brand-intent queries (needs keyword_queries)
+#   chaining - Instagram's "similar accounts", expanded from seed brands
+#              (needs seeds: manual, or auto-bootstrapped from prior runs)
+# Each strategy is inert unless its per-niche input is present.
+# ---------------------------------------------------------------------------
+discovery:
+  enabled: [hashtag, keyword, chaining]   # remove any you don't want
+  max_requests_per_run: 400               # hard cap on IG requests (0 = unlimited)
+  per_strategy_max:                       # max candidates each strategy adds / niche
+    hashtag: 200
+    keyword: 60
+    chaining: 100
+  source_weights:                         # higher weight survives the niche cap first
+    chaining: 2.0
+    keyword: 1.5
+    hashtag: 1.0
+  # Cap each strategy's share of a niche's max_authors (fraction), so the
+  # heaviest source can't fill the whole cap and starve the others. Leftover
+  # slots are backfilled, so capacity is never wasted. e.g. max_authors 200 with
+  # chaining 0.5 -> at most 100 chaining, the other 100 go to keyword/hashtag.
+  source_share:
+    chaining: 0.5
+  provenance_bonus: 0                     # optional score bonus by source (0 = off)
+  hashtag:
+    mode: null                            # null -> settings.hashtag_mode
+    medias_per_tag: null                  # null -> settings.hashtag_medias_per_tag
+  keyword:
+    per_query: 30
+    max_queries_per_niche: 4
+  chaining:
+    per_seed: 12
+    max_seeds_per_niche: 8
+    max_seeds_from_keyword: 3             # reuse strong keyword hits as seeds
+    fallback_gql: true                    # public GraphQL fallback if chaining empty
+  seed_pool:
+    enabled: true
+    state_path: output/seed_pool.json     # gitignored; grows seeds across runs
+    per_niche: 10
+    min_score: 70                         # only strong qualifying leads become seeds
+  relevance:
+    enabled: true
+    sample_posts: 3                       # reuses enrich's media call (no extra requests)
+    min_overlap: 1
+    action: flag                          # flag (never drops) | drop
 
 # Substrings that suggest an account sells something (matched against name + bio).
 commerce_keywords: [shop, store, free shipping, etsy, boutique, order, buy]
@@ -52,6 +108,14 @@ niches:
     # Prefer specific, product-intent tags over broad ones like #gifts.
     hashtags: [jewellerybrand, handmadejewellery, customizedjewellery]
     max_authors: 200
+    # Seeds: known brand accounts to find LOOKALIKES of (via chaining). Optional —
+    # if omitted, the seed pool auto-bootstraps from your best hashtag leads.
+    seeds: [some_known_jewelry_brand, another_jewelry_brand]
+    # Brand-intent search queries (account search). Optional.
+    keyword_queries: ["jewelry store", "handmade jewelry brand"]
+    # Extra words that count as niche fit for the relevance check. Optional —
+    # otherwise derived from the niche name + hashtags.
+    relevance_keywords: [jewelry, necklace, ring, gold, silver, bracelet]
 
   - name: home decor
     # No extra tags needed — #homedecor is scanned automatically from the name.
@@ -59,6 +123,9 @@ niches:
     # hashtags: [homedecorstore, smallbizhomedecor]
     hashtags: []
     max_authors: 150
+    # seeds: [some_home_decor_brand]
+    # keyword_queries: ["home decor store", "home decor brand"]
+    relevance_keywords: [decor, interior, home, furniture, cushion]
 
 # --- Example: adding a third niche (just append to the list) ----------------
 #  - name: activewear

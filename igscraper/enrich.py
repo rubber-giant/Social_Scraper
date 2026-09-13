@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Set
 
 from .client import InstagramClient
 from .config import Config
+from .models import Candidate
+from .relevance import keywords_by_niche, verify_row
 
 logger = logging.getLogger("igscraper.enrich")
 
@@ -29,6 +31,7 @@ def enrich(
     authors_by_niche: Dict[str, List[str]],
     niches_by_author: Dict[str, Set[str]],
     found_tag_by_author: Dict[str, str],
+    candidates: Optional[Dict[str, Candidate]] = None,
 ) -> List[Dict]:
     """Fetch and enrich profiles for all discovered candidates.
 
@@ -37,6 +40,8 @@ def enrich(
       found_via    -> hashtag that first surfaced the account
       latest_post  -> datetime of the newest sampled post (or None)
       sample_count, avg_likes, avg_comments, eng_pct
+      discovery_sources / discovery_sources_label -> how it was found
+      relevance_hits / relevance_matched -> niche-fit check (if enabled)
     """
     usernames = _dedupe_order(authors_by_niche)
     cap = int(config.settings.get("max_candidates", 0))
@@ -47,8 +52,13 @@ def enrich(
         usernames = usernames[:cap]
 
     sample_posts = int(config.scoring.get("engagement_sample_posts", 0))
+    rel = config.discovery.get("relevance", {}) or {}
+    relevance_on = bool(rel.get("enabled"))
+    if relevance_on:
+        sample_posts = max(sample_posts, int(rel.get("sample_posts", 0)))
     # Always pull at least the newest post so we can measure activity/recency.
     media_amount = max(1, sample_posts)
+    kw_by_niche = keywords_by_niche(config) if relevance_on else {}
 
     rows: List[Dict] = []
     logger.info("Enriching %d candidate profiles ...", len(usernames))
@@ -62,12 +72,28 @@ def enrich(
         row["niches"] = sorted(niches_by_author.get(username, set()))
         row["found_via"] = found_tag_by_author.get(username, "")
 
+        # --- provenance (how this account was discovered) ---
+        sources = []
+        if candidates and username in candidates:
+            sources = candidates[username].sources
+        row["discovery_sources"] = [
+            {"strategy": s.strategy, "ref": s.ref, "weight": s.weight} for s in sources
+        ]
+        row["discovery_sources_label"] = "; ".join(s.label for s in sources)
+        row["discovery_weight"] = round(max((s.weight for s in sources), default=0.0), 2)
+        # Keep "Found via" a bare hashtag when the account came from a tag.
+        primary_hashtag = next(
+            (s.ref for s in sources if s.strategy == "hashtag"), row["found_via"]
+        )
+        row["found_via"] = primary_hashtag
+
         # --- recent activity (recency + engagement sample) ---
         row["latest_post"] = None
         row["sample_count"] = 0
         row["avg_likes"] = 0
         row["avg_comments"] = 0
         row["eng_pct"] = None
+        row["_sample_captions"] = []
 
         user_id = profile["pk"]
         if profile["media_count"] and user_id:
@@ -82,11 +108,17 @@ def enrich(
                 row["avg_comments"] = round(
                     sum(int(m.comment_count or 0) for m in media) / len(media), 1
                 )
+                row["_sample_captions"] = [
+                    (getattr(m, "caption_text", "") or "") for m in media
+                ]
                 followers = int(profile["follower_count"] or 0)
                 if followers:
                     row["eng_pct"] = round(
                         (row["avg_likes"] + row["avg_comments"]) / followers * 100, 2
                     )
+
+        if relevance_on:
+            verify_row(row, kw_by_niche, int(rel.get("min_overlap", 1)))
 
         rows.append(row)
         if i % 10 == 0 or i == len(usernames):

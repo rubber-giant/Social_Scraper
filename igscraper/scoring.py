@@ -156,6 +156,13 @@ def evaluate(row: Dict, config: Config) -> Dict:
 
     row["score"] = round(size_pts + recency_pts + product_pts + contact_pts)
 
+    # Optional provenance bonus: reward higher-quality discovery sources
+    # (chaining=2.0 > keyword=1.5 > hashtag=1.0). 0 disables it entirely.
+    bonus_cfg = float(config.discovery.get("provenance_bonus", 0) or 0)
+    if bonus_cfg > 0:
+        weight = float(row.get("discovery_weight") or 0)
+        row["score"] = round(row["score"] + min(bonus_cfg, bonus_cfg * weight / 2.0))
+
     # -- hard gates ----------------------------------------------------------
     sc = config.scoring
     max_days = int(sc.get("max_days_since_last_post", 30))
@@ -176,6 +183,12 @@ def evaluate(row: Dict, config: Config) -> Dict:
             gates.append("engagement-unmeasured")
         elif eng < min_eng:
             gates.append("low-engagement")
+
+    # Niche-relevance check defaults to flag-only (never drops a lead); a gate
+    # is only added when the user opts into action: drop.
+    rel = config.discovery.get("relevance", {}) or {}
+    if rel.get("enabled") and rel.get("action") == "drop" and row.get("relevance_flagged"):
+        gates.append("niche-mismatch")
 
     row["qualifies"] = not gates
     row["flags"] = "|".join(gates)

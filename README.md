@@ -21,6 +21,7 @@ profiles, and writes an `.xlsx` you can work straight from.
 - [What you get (output)](#what-you-get-output)
 - [Tuning runtime & lead volume](#tuning-runtime--lead-volume)
 - [Adding niches optimally](#adding-niches-optimally)
+- [Discovery strategies](#discovery-strategies)
 - [Config reference](#config-reference)
 - [Troubleshooting](#troubleshooting)
 - [Sharing this repo safely (security & privacy)](#sharing-this-repo-safely-security--privacy)
@@ -30,8 +31,10 @@ profiles, and writes an `.xlsx` you can work straight from.
 
 ## How it works
 
-1. **Discover** — for each niche, scans the niche's hashtag feed(s) and collects
-   the accounts posting there right now (de-duplicated across niches).
+1. **Discover** — for each niche, finds candidate accounts through several
+   strategies (hashtag feeds, keyword account search, and seed-based lookalike
+   expansion), merged and de-duplicated across niches. See
+   [Discovery strategies](#discovery-strategies).
 2. **Enrich** — pulls each candidate's public profile (bio, category, followers,
    business email/phone, link-in-bio) plus their latest post (for activity).
 3. **Score & filter** — a lead qualifies only if it:
@@ -131,6 +134,13 @@ it on later runs, so you won't re-login every time.
 
 # more detail in the logs
 .venv/bin/python run.py discover -v
+
+# preview the discovery plan + request estimate WITHOUT logging in or scraping
+.venv/bin/python run.py discover --dry-run
+
+# run only some strategies, or only one niche
+.venv/bin/python run.py discover --strategies hashtag,chaining
+.venv/bin/python run.py discover --only-niche candles
 ```
 
 Long runs are fine in the background:
@@ -154,7 +164,8 @@ nohup .venv/bin/python run.py discover > run.log 2>&1 &
 Key columns: `Score`, `Brand name`, `Handle` (clickable), `Bio`, `Category`,
 `Followers`, `Avg likes`, `Eng rate %`, `Latest post`, `Days inactive`,
 `Active?`, `Website` (clickable), `Email`, `Other emails`, `Phone`,
-`Product signals`, `Matched niche`, `Found via`, `Why excluded`.
+`Product signals`, `Matched niche`, `Found via`, `Discovery sources`,
+`Relevance`, `Why excluded`.
 
 ---
 
@@ -163,11 +174,18 @@ Key columns: `Score`, `Brand name`, `Handle` (clickable), `Bio`, `Category`,
 Two things decide how long a run takes and how many leads you get: **how many
 candidates** you collect, and **how long each candidate takes**.
 
-**Rules of thumb** (default pacing of 3–5 s per request, ~2 requests per
-candidate):
+**Rules of thumb** (~2 requests per candidate):
 
 - **Time ≈ candidates × ~1 minute.**
 - **Leads ≈ 15–20% of candidates.**
+
+> **Pacing — why a run takes hours.** instagrapi sleeps `settings.request_timeout`
+> (default `30`) before *every* non-login request as anti-ban pacing, and *then*
+> adds the `delay_range` (`per_request_delay_sec` + jitter, default 3–5 s). So one
+> request costs `request_timeout + delay` ≈ **34 s**. That — not your CPU — is
+> what dominates a run. Lowering it speeds things up but raises the chance
+> Instagram throttles or flags the account; see
+> [Which knobs to turn](#which-knobs-to-turn).
 
 **Measured example** (this project, default settings): `#jwellery` + `#tshirts`
 niches → **150 candidates → 27 leads**, and the run took **~3 hours**. So:
@@ -179,18 +197,21 @@ niches → **150 candidates → 27 leads**, and the run took **~3 hours**. So:
 | 150        | ~3 h        | ~27 (measured) |
 | 400        | ~7–8 h      | 60–80        |
 
-> Times are dominated by request pacing, not your CPU. Lowering delays speeds
-> runs up but raises the chance Instagram throttles or flags the account.
-
 ### Which knobs to turn
 
 | Knob | Where | Effect on time | Effect on leads |
 |---|---|---|---|
-| `per_request_delay_sec` / `request_delay_jitter` | `settings` | ↓ = faster, more risk | none |
+| `per_request_delay_sec` / `request_delay_jitter` | `settings` | ↓ = faster, more risk — but only the 3–5 s part of the ~34 s | none |
+| `request_timeout` | `settings` | **dominant knob**: the 30 s pre-request sleep *and* the socket timeout. ↓ = far faster; too low → timeouts (60 s retry) | none |
 | `hashtag_medias_per_tag` | `settings` | ↑ = more candidates = more time | ↑ |
 | `hashtag_mode` (`top`/`recent`/`both`) | `settings` | `both` ≈ 2× discovery | ↑ |
 | `niches[].max_authors` | per niche | caps that niche's candidates | caps it |
 | `max_candidates` | `settings` | hard cap on total enriched | caps total |
+| `discovery.enabled` | `discovery` | removing strategies = less discovery | ↓ |
+| `discovery.max_requests_per_run` | `discovery` | hard wall on discovery requests | caps it |
+| `discovery.per_strategy_max` | `discovery` | caps each strategy's candidates/niche | caps it |
+| `niches[].seeds` / `keyword_queries` | per niche | ↑ sources = more candidates = more time | ↑ |
+| `discovery.relevance.action: drop` | `discovery` | free (filtering) | ↓ noise |
 | `engagement_sample_posts` | `scoring` | `>0` = more requests per candidate | enables engagement gate |
 | `scoring.*` gates | `scoring` | free (filtering) | ↑/↓ |
 
@@ -253,7 +274,9 @@ the global cap will silently truncate the niches listed last.
 
 ## Adding niches optimally
 
-A niche is just a keyword plus a few hashtags. The name is auto-slugged into a
+A niche is a keyword plus the inputs that feed each strategy (hashtags, and
+optionally `keyword_queries` / `seeds` — see
+[Discovery strategies](#discovery-strategies)). The name is auto-slugged into a
 hashtag (`home decor` → `#homedecor`), and `hashtags[]` adds **extra** tags.
 
 **Do:**
@@ -306,6 +329,104 @@ only get enriched once.
 
 ---
 
+## Discovery strategies
+
+Accounts are found through up to three strategies, merged and de-duplicated,
+then capped per niche by **provenance priority** (higher weight survives the cap
+first). Configure under `discovery:` in `config.yaml`.
+
+| Strategy | What it does | Needs | Request cost | Risk | Default |
+|---|---|---|---|---|---|
+| `hashtag` | Authors of posts under the niche's tags. | `niches[].hashtags` | tags × feeds | medium | on |
+| `keyword` | Account search on brand-intent queries (`"jewelry store"`). Finds brands by name/bio even if they never use your tags. | `niches[].keyword_queries` | queries | medium | on (inert until set) |
+| `chaining` | Instagram's own **"similar accounts"** for each seed brand — looks for *lookalikes* of brands you already know. | `niches[].seeds` (+ auto seed pool) | 2 × seeds | **low** | on (inert until set) |
+
+`keyword` and `chaining` are inert until you give them input, so an existing
+hashtag-only `config.yaml` behaves exactly as before.
+
+### How to use them
+
+Everything is per-niche. `hashtags` feeds `hashtag`, `keyword_queries` feeds
+`keyword`, `seeds` feeds `chaining` — set any combination:
+
+```yaml
+niches:
+  - name: jwellery
+    max_authors: 80
+
+    # hashtag: authors of posts under these tags (plus the niche name's slug).
+    hashtags: [jewellerybrand, handmadejewellery]
+
+    # keyword: Instagram account search on brand-intent phrases. Use language
+    # a shopper/brand would use, not your own category word: "jewelry store"
+    # finds businesses; "jewelry" finds everything. 2-4 per niche.
+    keyword_queries: ["jewelry store", "handmade jewelry brand"]
+
+    # chaining: brands to find *lookalikes* of. 2-4 handles you already know
+    # that sit near your target size (see "Pick seeds near your target size").
+    seeds: [mejuri, linjerco]
+
+    # relevance: extra words that count as niche fit for the flag column.
+    relevance_keywords: [jewelry, necklace, ring, gold, silver]
+```
+
+To run just one of them (handy while testing), use
+`--strategies keyword` or `--strategies chaining` — see
+[Running it](#running-it).
+
+### Seeds & the auto-growing seed pool
+
+`chaining` expands each **seed** to find similar brands, so it needs seeds:
+
+- **Manual** — list 2–4 known brand handles per niche: `seeds: [brand_a, brand_b]`.
+- **Automatic** — every run writes your strongest qualifying leads (score ≥
+  `seed_pool.min_score`) to `output/seed_pool.json` and reuses them as seeds next
+  run. Coverage compounds: run once, then each run finds lookalikes of the best
+  accounts found so far. (`output/` is gitignored, so this never leaks.)
+
+The two also combine within a run: strong `keyword` hits are reused as seeds for
+`chaining` in the same run (`chaining.max_seeds_from_keyword`).
+
+**Pick seeds near your target size.** A lookalike of a giant seed is a giant —
+chaining from a luxury megabrand returns more megabrands, which then fail
+`scoring.max_followers` and waste the run. Seeds work best when they're inside
+(or just above) your target follower band, since Instagram's similarity graph
+clusters by size and market. Prefer mid-size, on-niche brands; let the seed pool
+grow from *qualifying* leads (which already pass your size gate) rather than
+seeding by hand from famous names.
+
+### Provenance & the relevance check
+
+- **`Discovery sources`** (Excel column) shows every surface that found an
+  account, e.g. `similar to @brand; search: 'jewelry store'; #jewellerybrand`.
+- **Fit vs. recall:** `source_weights` decide rank order, and
+  `source_share` stops the heaviest source from filling a niche's whole
+  `max_authors` cap. By default `chaining` is capped to 50%, so half of each
+  niche's slots go to `keyword`/`hashtag` instead of all to lookalikes. Any
+  slots the others leave unused are backfilled, so nothing is wasted.
+- **`Relevance`** samples the account's own recent posts (reusing a request the
+  tool already makes — **no extra cost**) and lists the niche keywords they
+  actually contain. This catches accounts surfaced by a broad tag that don't
+  really fit the niche. By default it only **flags** (`action: flag`); set
+  `action: drop` to exclude non-matching accounts from `Top Leads`.
+- Optional `discovery.provenance_bonus` adds a small score bonus by source
+  (0 = off, scoring unchanged).
+
+### Cost control
+
+- `discovery.max_requests_per_run` is a hard cap on Instagram requests per run
+  (0 = unlimited). Strategies stop gracefully when it's hit, so a run can't blow
+  up in time no matter how many tags/seeds/queries you configure.
+- `discovery.per_strategy_max.<strategy>` caps how many candidates each strategy
+  adds per niche.
+- Budget check: `~ discover_requests + 2 × candidates` (see
+  [Tuning runtime](#tuning-runtime--lead-volume) for the per-request cost).
+
+> A `chaining` seed that's private or ineligible simply logs and is skipped, and
+> an empty result falls back to a public GraphQL lookup (`chaining.fallback_gql`).
+
+---
+
 ## Config reference
 
 `config.yaml` mirrors `config.example.yaml`; every key is optional.
@@ -314,6 +435,7 @@ only get enriched once.
 |---|---|---|
 | `settings.per_request_delay_sec` | `3.0` | Base seconds between requests. |
 | `settings.request_delay_jitter` | `2.0` | Random extra seconds added per request. |
+| `settings.request_timeout` | `30` | **Dominant pacing knob** (instagrapi sleeps it pre-request) *and* the socket timeout. Lower = much faster; too low raises timeouts. |
 | `settings.hashtag_mode` | `recent` | `top` (fewer, popular) / `recent` / `both`. |
 | `settings.hashtag_medias_per_tag` | `30` | Posts scanned per hashtag. |
 | `settings.max_candidates` | `400` | Hard cap on profiles enriched (0 = no cap). |
@@ -323,9 +445,26 @@ only get enriched once.
 | `scoring.min_engagement_pct` | `0.0` | Optional engagement gate (0 = off). |
 | `scoring.engagement_sample_posts` | `0` | Recent posts to sample (0 = off, fewer calls). |
 | `commerce_keywords` | `shop, store, ...` | Substrings hinting an account sells. |
+| `discovery.enabled` | `[hashtag, keyword, chaining]` | Which strategies run. |
+| `discovery.max_requests_per_run` | `400` | Hard cap on requests per run (0 = unlimited). |
+| `discovery.per_strategy_max.<s>` | varies | Max candidates each strategy adds per niche. |
+| `discovery.source_weights.<s>` | `chaining 2.0, keyword 1.5, hashtag 1.0` | Provenance priority for the niche cap. |
+| `discovery.source_share.<s>` | `chaining 0.5` | Cap on a strategy's share of `max_authors` (fraction); leftover slots backfilled. |
+| `discovery.provenance_bonus` | `0` | Optional score bonus by source (0 = off). |
+| `discovery.hashtag.mode` / `medias_per_tag` | `null` | Overrides `settings.hashtag_*` when set. |
+| `discovery.keyword.per_query` / `max_queries_per_niche` | `30` / `4` | Account-search breadth. |
+| `discovery.chaining.per_seed` / `max_seeds_per_niche` | `12` / `8` | Lookalikes per seed / seeds per niche. |
+| `discovery.chaining.max_seeds_from_keyword` | `3` | Keyword hits reused as same-run seeds. |
+| `discovery.seed_pool.enabled` / `per_niche` / `min_score` | `true` / `10` / `70` | Auto-growing seed pool. |
+| `discovery.seed_pool.state_path` | `output/seed_pool.json` | Where the pool is stored (gitignored). |
+| `discovery.relevance.enabled` | `true` | Niche-fit check (reuses enrich's media call). |
+| `discovery.relevance.action` | `flag` | `flag` (never drops) or `drop` (gates Top Leads). |
 | `niches[].name` | — | Product category (auto-slugged to a hashtag). |
 | `niches[].hashtags` | `[]` | Extra hashtags to scan. |
 | `niches[].max_authors` | `200` | Max candidates this niche contributes. |
+| `niches[].seeds` | `[]` | Known brands to find lookalikes of (chaining). |
+| `niches[].keyword_queries` | `[]` | Brand-intent account-search queries. |
+| `niches[].relevance_keywords` | `[]` | Extra words counted as niche fit. |
 
 ---
 
@@ -394,11 +533,15 @@ Social_Scraper/
 ├── requirements.txt
 ├── session.json            # created on first login (gitignored — secret)
 ├── .env                    # your secrets (gitignored)
-├── output/                 # generated .xlsx files (gitignored)
+├── output/                 # generated .xlsx + seed_pool.json (gitignored)
 └── igscraper/
     ├── config.py           # loads config.yaml + .env
-    ├── client.py           # instagrapi wrapper: sessionid/password login, pacing
-    ├── discovery.py        # niche -> hashtags -> candidate accounts
+    ├── client.py           # instagrapi wrapper: login, pacing, discovery calls
+    ├── models.py           # Source / Candidate / DiscoveryResult
+    ├── discovery.py        # niche -> candidate accounts (multi-strategy)
+    ├── strategies.py       # hashtag / keyword / chaining strategies + budget
+    ├── seedpool.py         # persists strong leads as next run's seeds
+    ├── relevance.py        # niche-fit check on sampled post captions
     ├── enrich.py           # full profiles + recent-post activity
     ├── scoring.py          # product/active/contact gates + 0–100 score
     └── export.py           # builds the Excel workbook
